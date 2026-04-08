@@ -4,9 +4,11 @@ address = "0.0.0.0"
 enableCORS = false
 enableXsrfProtection = false
 enableWebsocketCompression = false
+maxUploadSize = 5
 
 [browser]
 gatherUsageStats = false
+serverAddress = "0.0.0.0"
 
 [theme]
 primaryColor = "#005b96"
