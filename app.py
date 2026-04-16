@@ -1,439 +1,179 @@
 import streamlit as st
-import numpy as np
-import pandas as pd
-import random
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-from torch.utils.data import TensorDataset, DataLoader
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score
-import time
-import hashlib
-import copy
-from datetime import datetime
-import plotly.express as px
-import plotly.graph_objects as go
+from core.engine import init_mock_state
+import views.dashboard as v_dash
+import views.ai_analysis as v_ai
+import views.stress_test as v_stress
+import views.world_benchmark as v_world
+import views.historical_scenarios as v_hist
+import views.policy_engine as v_policy
+import views.unlearning_lab as v_lab
 
-st.set_page_config(page_title="PIMA ADISA Governance", page_icon="🩸", layout="wide")
+st.set_page_config(
+    page_title="PIMA ADISA Governance Simulator",
+    page_icon="🏛️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Premium CSS Injection
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Inter:wght@300;400;600&display=swap');
 
-def seed_everything():
-    torch.manual_seed(42)
-    np.random.seed(42)
-    random.seed(42)
-
-# ============================
-# MEDICAL AI CORE (PIMA)
-# ============================
-class MLP(nn.Module):
-    def __init__(self, in_features=8, hidden1=32, hidden2=16, out_features=2):
-        super().__init__()
-        self.fc1 = nn.Linear(in_features, hidden1)
-        self.fc2 = nn.Linear(hidden1, hidden2)
-        self.out = nn.Linear(hidden2, out_features)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        return self.out(x)
-
-def train_model(model, X_t, y_t, epochs=10, batch_size=32, lr=0.005):
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    loader = DataLoader(TensorDataset(X_t, y_t), batch_size=batch_size, shuffle=True)
-    for epoch in range(epochs):
-        for xb, yb in loader:
-            xb, yb = xb.to(device), yb.to(device)
-            loss = F.cross_entropy(model(xb), yb)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-    return model
-
-def extract_features(model, X_t):
-    model.eval()
-    feats = []
-    loader = DataLoader(TensorDataset(X_t), batch_size=256)
-    with torch.no_grad():
-        for (xb,) in loader:
-            xb = xb.to(device)
-            x = F.relu(model.fc1(xb))
-            feats.append(x.cpu().numpy())
-    return np.vstack(feats)
-
-def get_model_fingerprint(model):
-    cache = [param.data.cpu().numpy().tobytes() for param in model.parameters()]
-    return hashlib.sha256(b"".join(cache)).hexdigest()[:12]
-
-# ============================
-# CACHED HEAVY LIFTING
-# Everything expensive runs ONCE and is cached.
-# ============================
-@st.cache_resource(show_spinner="Compiling ADISA Engine (runs once, then cached)...")
-def build_engine():
-    seed_everything()
-
-    # --- Load PIMA dataset ---
-    url = "https://raw.githubusercontent.com/jbrownlee/Datasets/master/pima-indians-diabetes.data.csv"
-    df = pd.read_csv(url, header=None)
-    df.columns = ["Pregnancies","Glucose","BloodPressure","SkinThickness",
-                  "Insulin","BMI","DiabetesPedigree","Age","Outcome"]
-
-    patient_ids = ["P-" + str(1000 + i) for i in range(len(df))]
-
-    X = df.drop(["Outcome"], axis=1).values
-    y = df["Outcome"].values
-
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-
-    X_t = torch.tensor(X_scaled, dtype=torch.float32)
-    y_t = torch.tensor(y, dtype=torch.long)
-
-    feature_names = list(df.columns[:-1])
-    target_names = ["Negative", "Diabetic"]
-
-    # --- Train Base Model ---
-    base_model = MLP().to(device)
-    base_model = train_model(base_model, X_t, y_t, epochs=10)
-
-    # --- Latent Feature Extraction + KMeans ---
-    latent_feats = extract_features(base_model, X_t)
-    kmeans = KMeans(n_clusters=5, random_state=42, n_init=10)
-    clusters = kmeans.fit_predict(latent_feats)
-
-    # --- Train Cluster Experts ---
-    experts = {}
-    sample_to_expert = {}
-    base_state = copy.deepcopy(base_model.state_dict())
-
-    for c in np.unique(clusters):
-        idx = np.where(clusters == c)[0]
-        m = MLP().to(device)
-        m.load_state_dict(base_state)
-
-        Xc = X_t[idx]
-        yc = y_t[idx]
-        c_pids = [patient_ids[i] for i in idx]
-
-        for p_id in c_pids:
-            sample_to_expert[p_id] = int(c)
-
-        train_model(m, Xc, yc, epochs=8)
-        m.eval()
-
-        experts[int(c)] = {
-            "model": m,
-            "global_idx": idx.tolist(),
-            "pids": c_pids,
-            "fingerprint": get_model_fingerprint(m)
-        }
-
-    # --- Measure full retrain baseline ---
-    t0 = time.time()
-    bench = MLP().to(device)
-    train_model(bench, X_t, y_t, epochs=10)
-    full_retrain_baseline = time.time() - t0
-
-    return {
-        "experts": experts,
-        "sample_to_expert": sample_to_expert,
-        "kmeans": kmeans,
-        "clusters": clusters,
-        "X_t": X_t,
-        "y_t": y_t,
-        "feature_names": feature_names,
-        "target_names": target_names,
-        "patient_ids": patient_ids,
-        "df_raw": df,
-        "scaler": scaler,
-        "full_retrain_baseline": full_retrain_baseline,
+    :root {
+        --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        --accent-glow: 0 0 15px rgba(102, 126, 234, 0.4);
     }
 
-def ensemble_predict(experts_dict, x_tensor):
-    preds = []
-    for exp in experts_dict.values():
-        exp["model"].eval()
-        with torch.no_grad():
-            logits = exp["model"](x_tensor.to(device))
-            prob = F.softmax(logits, dim=1).cpu().numpy()[0]
-            preds.append(prob)
-    avg_probs = np.mean(preds, axis=0)
-    pred_idx = int(np.argmax(avg_probs))
-    return pred_idx, float(avg_probs[pred_idx])
+    /* Global Typography */
+    html, body, [class*="css"] {
+        font-family: 'Inter', sans-serif !important;
+    }
+    h1, h2, h3, h4, h5, h6 {
+        font-family: 'Outfit', sans-serif !important;
+        letter-spacing: -0.5px;
+    }
 
-# ============================
-# STATE MANAGEMENT
-# ============================
-def init_state():
-    if "initialized" not in st.session_state:
-        engine = build_engine()
+    /* Glassmorphism Sidebar */
+    [data-testid="stSidebar"] {
+        background: rgba(15, 15, 25, 0.95) !important;
+        backdrop-filter: blur(10px);
+        border-right: 1px solid rgba(255, 255, 255, 0.05);
+    }
 
-        # Copy mutable structures into session_state so they can be modified
-        st.session_state.experts = engine["experts"]
-        st.session_state.sample_to_expert = dict(engine["sample_to_expert"])
-        st.session_state.kmeans = engine["kmeans"]
-        st.session_state.clusters = engine["clusters"]
-        st.session_state.X_t = engine["X_t"]
-        st.session_state.y_t = engine["y_t"]
-        st.session_state.feature_names = engine["feature_names"]
-        st.session_state.target_names = engine["target_names"]
-        st.session_state.p_ids = engine["patient_ids"]
-        st.session_state.df_raw = engine["df_raw"]
-        st.session_state.scaler = engine["scaler"]
-        st.session_state.full_retrain_baseline = engine["full_retrain_baseline"]
+    /* Metric Cards */
+    [data-testid="stMetric"] {
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        padding: 15px !important;
+        border-radius: 12px !important;
+        transition: all 0.3s ease;
+    }
+    [data-testid="stMetric"]:hover {
+        transform: translateY(-2px);
+        background: rgba(255, 255, 255, 0.06);
+        border-color: rgba(102, 126, 234, 0.5);
+        box-shadow: var(--accent-glow);
+    }
 
-        st.session_state.audit_logs = []
-        st.session_state.unlearn_events = []
+    /* Buttons */
+    .stButton > button {
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+        transition: all 0.2s ease !important;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        font-size: 0.8rem;
+    }
+    .stButton > button:hover {
+        transform: scale(1.02);
+        box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    }
 
-        st.session_state.metrics = {
-            "version": "v2.0.0-pima-adisa",
-            "val_accuracy": 0.81,
-            "val_precision": 0.79,
-            "val_recall": 0.85,
-            "val_f1": 0.82,
-            "avg_unlearn_time": 0.0,
-            "total_deletions": 0,
-            "flagged_cases": 0
-        }
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar {
+        width: 8px;
+    }
+    ::-webkit-scrollbar-track {
+        background: rgba(0,0,0,0.1);
+    }
+    ::-webkit-scrollbar-thumb {
+        background: rgba(255,255,255,0.1);
+        border-radius: 10px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: rgba(255,255,255,0.2);
+    }
 
-        st.session_state.initialized = True
-        log_event("System", "Initialization", None, "PIMA Diabetes ADISA Sharded System booted.")
+    /* Animations */
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    .stApp {
+        animation: fadeIn 0.6s ease-out;
+    }
+    
+    /* Plotly Chart Styling */
+    .js-plotly-plot {
+        border-radius: 15px;
+        overflow: hidden;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-def log_event(user, action, p_id, desc):
-    st.session_state.audit_logs.append({
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "user": user,
-        "action": action,
-        "patient_id": p_id,
-        "version": st.session_state.metrics["version"],
-        "description": desc
-    })
+def init_sim_state():
+    if "history" not in st.session_state:
+        st.session_state.history = [init_mock_state()]
 
-# ============================
-# VIEWS
-# ============================
-def view_classifier():
-    st.header("Workspace: PIMA Diabetes Classifier")
-    st.markdown("Run inferences using the ADISA Latent Shard Ensemble. Select an existing patient or alter their metrics.")
 
-    active_pids = list(st.session_state.sample_to_expert.keys())
-    if not active_pids:
-        st.error("No active patients available.")
-        return
-
-    c1, c2 = st.columns([1, 1])
-
-    with c1:
-        selected_pid = st.selectbox("Select Active Patient Record", active_pids)
-        g_idx = st.session_state.p_ids.index(selected_pid)
-        raw_row = st.session_state.df_raw.iloc[g_idx]
-
-        with st.form("metric_form"):
-            st.markdown("**Clinical Observations**")
-
-            c_a, c_b = st.columns(2)
-            preg = c_a.number_input("Pregnancies", value=float(raw_row["Pregnancies"]))
-            glu = c_b.number_input("Glucose", value=float(raw_row["Glucose"]))
-            bp = c_a.number_input("Blood Pressure", value=float(raw_row["BloodPressure"]))
-            skin = c_b.number_input("Skin Thickness", value=float(raw_row["SkinThickness"]))
-            ins = c_a.number_input("Insulin", value=float(raw_row["Insulin"]))
-            bmi = c_b.number_input("BMI", value=float(raw_row["BMI"]))
-            dpf = c_a.number_input("Diabetes Pedigree", value=float(raw_row["DiabetesPedigree"]))
-            age = c_b.number_input("Age", value=float(raw_row["Age"]))
-
-            submitted = st.form_submit_button("Run Diabetics Diagnosis via Shard Ensemble", type="primary")
-
-            if submitted:
-                inp = np.array([[preg, glu, bp, skin, ins, bmi, dpf, age]])
-                inp_scaled = st.session_state.scaler.transform(inp)
-                x_tensor = torch.tensor(inp_scaled, dtype=torch.float32)
-
-                pred, conf = ensemble_predict(st.session_state.experts, x_tensor)
-                pred_label = st.session_state.target_names[pred]
-
-                st.session_state.last_pred = {
-                    "pid": selected_pid,
-                    "pred": pred_label,
-                    "conf": conf,
-                    "cluster": st.session_state.sample_to_expert.get(selected_pid, "N/A")
-                }
-                log_event("Dr. User", "Diagnosis", selected_pid, f"Predicted {pred_label} with {conf:.2%} confidence.")
-
-    with c2:
-        if "last_pred" in st.session_state and st.session_state.last_pred.get("pid") == selected_pid:
-            p = st.session_state.last_pred
-            st.subheader("Diagnostic Results")
-            st.metric("Predicted Condition", "🚨 Diabetic" if p['pred']=="Diabetic" else "✅ Negative")
-            st.progress(p['conf'], text=f"Ensemble Confidence: {p['conf']:.2%}")
-            st.info(f"Primary Latent Cluster Affinity: **Cluster {p['cluster']}**")
-
-            st.divider()
-            st.markdown("### Clinical Peer Review")
-            flagged = st.toggle("Flag for Board Review")
-            notes = st.text_area("Reviewer Notes")
-            save_flag = st.button("Save Flag")
-            if save_flag:
-                st.session_state.metrics["flagged_cases"] += 1
-                log_event("Dr. User", "Flagged", selected_pid, f"Record flagged. Notes: {notes}")
-                st.success("Flag saved to audit trail.")
-        else:
-            st.info("Submit the diagnostic form to view results.")
-
-def view_unlearning():
-    st.header("ADISA Latent Machine Unlearning (HIPAA)")
-    st.markdown("Selectively purge a patient. The system locates their K-Means cluster and exclusively retrains that sub-network.")
-
-    pid_str = st.text_input("Enter Patient ID to revoke (e.g. P-1045):")
-
-    if pid_str:
-        if pid_str in st.session_state.sample_to_expert:
-            exp_id = st.session_state.sample_to_expert[pid_str]
-            st.success(f"Patient {pid_str} mapped to Latent Cluster {exp_id}.")
-
-            with st.form("unlearn_form"):
-                st.markdown("**Compliance Checklist**")
-                requester = st.text_input("Requesting Officer", value="Compliance Bot")
-                reason = st.selectbox("Reason for Deletion", ["HIPAA Erasure", "GDPR Right to Erasure", "Consent Revoked", "Data Sourcing Error"])
-                consent = st.checkbox("I authorize deep topological unlearning.", value=False)
-
-                submitted = st.form_submit_button("Execute Sub-Shard Retraining")
-
-                if submitted:
-                    if not consent:
-                        st.error("Operation aborted. Check the consent box.")
-                    else:
-                        with st.spinner(f"Severing {pid_str} from Cluster {exp_id} network..."):
-                            start_time = time.time()
-                            exp = st.session_state.experts[exp_id]
-
-                            local_idx = exp["pids"].index(pid_str)
-
-                            global_indices = exp["global_idx"]
-                            keep_global = [i for i in global_indices if i != global_indices[local_idx]]
-
-                            new_pids = [exp["pids"][i] for i in range(len(exp["pids"])) if i != local_idx]
-
-                            new_X = st.session_state.X_t[keep_global]
-                            new_y = st.session_state.y_t[keep_global]
-
-                            new_m = MLP().to(device)
-                            if len(new_X) > 0:
-                                train_model(new_m, new_X, new_y, epochs=8)
-                            new_m.eval()
-
-                            st.session_state.experts[exp_id] = {
-                                "model": new_m,
-                                "global_idx": keep_global,
-                                "pids": new_pids,
-                                "fingerprint": get_model_fingerprint(new_m)
-                            }
-                            del st.session_state.sample_to_expert[pid_str]
-
-                            u_time = time.time() - start_time
-                            f_time = st.session_state.full_retrain_baseline
-
-                            old_acc = st.session_state.metrics["val_accuracy"]
-                            new_acc = old_acc - random.uniform(-0.002, 0.005)
-
-                            st.session_state.metrics["val_accuracy"] = new_acc
-                            st.session_state.metrics["total_deletions"] += 1
-                            st.session_state.metrics["avg_unlearn_time"] = u_time
-
-                            log_desc = f"Erased {pid_str}. K-Means Shard {exp_id} surgically retrained in {u_time:.2f}s."
-                            log_event(requester, "Data Purged", pid_str, log_desc)
-
-                            st.session_state.unlearn_events.append({
-                                "timestamp": datetime.now().strftime("%H:%M:%S"),
-                                "patient_id": pid_str,
-                                "shards": [exp_id],
-                                "sisa_time": u_time,
-                                "full_time": f_time,
-                                "old_acc": old_acc,
-                                "new_acc": new_acc
-                            })
-
-                            st.session_state.last_unlearn = st.session_state.unlearn_events[-1]
-                            st.rerun()
-        else:
-            st.warning("Patient ID not found. Ensure format matches (e.g. P-1004) or was already wiped.")
-
-    if "last_unlearn" in st.session_state:
-        lu = st.session_state.last_unlearn
-        st.subheader("Sharded Efficiency Report")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("SISA Unlearn Time", f"{lu['sisa_time']:.2f}s", delta="ADISA", delta_color="normal")
-        c2.metric("Full Retrain Time", f"{lu['full_time']:.2f}s", delta="Avoided", delta_color="inverse")
-        c3.metric("Aggregate Accuracy", f"{lu['new_acc']:.3f}", f"{lu['new_acc'] - lu['old_acc']:.3f}")
-
-def view_monitoring():
-    st.header("Verification & Monitoring")
-
-    m = st.session_state.metrics
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("K-Means Shards", "5 Clusters")
-    k2.metric("Total HIPAA Deletions", m["total_deletions"])
-    k3.metric("Last Unlearn Latency", f"{m['avg_unlearn_time']:.3f}s")
-    k4.metric("Flagged Anomalies", m["flagged_cases"])
-
-    st.divider()
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Network Performance Matrix")
-        df_m = pd.DataFrame({
-            "Metric": ["Accuracy", "Precision", "Recall", "F1 Score"],
-            "Score": [m["val_accuracy"], m["val_precision"], m["val_recall"], m["val_f1"]]
-        })
-        fig1 = px.bar(df_m, x="Metric", y="Score", range_y=[0.6, 1.0], color="Metric")
-        st.plotly_chart(fig1, use_container_width=True)
-
-    with c2:
-        st.subheader("ADISA Latency Analysis")
-        if st.session_state.unlearn_events:
-            df_u = pd.DataFrame(st.session_state.unlearn_events)
-            fig3 = go.Figure()
-            fig3.add_trace(go.Scatter(x=df_u["timestamp"], y=df_u["full_time"], mode='lines+markers', name="Full Cost (Avoided)", line=dict(dash='dash', color='red')))
-            fig3.add_trace(go.Scatter(x=df_u["timestamp"], y=df_u["sisa_time"], mode='lines+markers', name="SISA Cost (Actual)", line=dict(color='green')))
-            st.plotly_chart(fig3, use_container_width=True)
-        else:
-            st.info("No deletions processed.")
-
-def view_audit():
-    st.header("HIPAA Compliance Audit Trail")
-
-    if not st.session_state.audit_logs:
-        st.info("No compliance logs available.")
-        return
-
-    df = pd.DataFrame(st.session_state.audit_logs)
-    st.dataframe(df, use_container_width=True, hide_index=True)
-
-# ============================
-# MAIN
-# ============================
 def main():
-    st.sidebar.title("🏥 ADISA Framework")
-    init_state()
+    init_sim_state()
 
-    page = st.sidebar.radio("Navigation", [
-        "🔍 Diagnostic Workspace",
-        "🧪 Patient Unlearning Lab",
-        "📊 Verification & Monitoring",
-        "📋 HIPAA Audit Ledger"
+    # Sidebar branding
+    st.sidebar.markdown(
+        """
+        <div style='text-align:center;padding:10px 0 5px 0'>
+            <span style='font-size:2.2em'>🏛️</span><br>
+            <span style='font-size:1.2em;font-weight:800;letter-spacing:0.5px'>PIMA ADISA</span><br>
+            <span style='font-size:0.75em;color:#aaa'>Governance Simulator v3.0 (2026)</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.sidebar.divider()
+
+    # Quick stats in sidebar
+    current = st.session_state.history[-1]
+    st.sidebar.markdown("**📊 Live Stats**")
+    st.sidebar.metric("Year", int(current["Year"]))
+    st.sidebar.metric("Democracy Score", f"{current['Democracy Score']:.1f}")
+    st.sidebar.metric("GDP", f"{current['GDP']:.1f}")
+    st.sidebar.metric("Turns Simulated", len(st.session_state.history) - 1)
+
+    if len(st.session_state.history) > 1:
+        if st.sidebar.button("↩️ Undo Last Turn", use_container_width=True):
+            st.session_state.history.pop()
+            if "ledger" in st.session_state and st.session_state.ledger:
+                st.session_state.ledger.pop()
+            st.rerun()
+
+    st.sidebar.divider()
+
+
+
+    # Navigation
+    page = st.sidebar.radio("🗺️ Where to go?", [
+        "📊 Nation Summary",
+        "🌍 Compare with World",
+        "🛡️ Rulebook & Policies",
+        "🧪 Forget Bad Data (AI)",
+        "📜 History Book",
+        "🤖 AI Analysis & Chat",
+        "🔬 Stress Testing"
     ])
-    st.sidebar.caption("PIMA Diabetes KMeans Sharded Architecture")
 
-    if page == "🔍 Diagnostic Workspace":
-        view_classifier()
-    elif page == "🧪 Patient Unlearning Lab":
-        view_unlearning()
-    elif page == "📊 Verification & Monitoring":
-        view_monitoring()
-    elif page == "📋 HIPAA Audit Ledger":
-        view_audit()
+    # Render selected page
+    if page == "📊 Nation Summary":
+        v_dash.render()
+    elif page == "🌍 Compare with World":
+        v_world.render()
+    elif page == "🛡️ Rulebook & Policies":
+        v_policy.render()
+    elif page == "🧪 Forget Bad Data (AI)":
+        v_lab.render()
+    elif page == "📜 History Book":
+        v_hist.render()
+    elif page == "🤖 AI Analysis & Chat":
+        v_ai.render()
+    elif page == "🔬 Stress Testing":
+        v_stress.render()
+
+    st.sidebar.divider()
+    if st.sidebar.button("⚠️ Hard Reset Simulation", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
 
 if __name__ == "__main__":
     main()
